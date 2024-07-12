@@ -10,11 +10,10 @@ import magnum as mn
 import numpy as np
 
 from habitat_hitl.core.gui_input import GuiInput
-from habitat_hitl.core.key_mapping import KeyCode, MouseButton
 
 
 class CameraHelper:
-    def __init__(self, hitl_config, gui_input: GuiInput):
+    def __init__(self, hitl_config, gui_input):
         # lookat offset yaw (spin left/right) and pitch (up/down)
         # to enable camera rotation and pitch control
         self._first_person_mode = hitl_config.camera.first_person_mode
@@ -62,28 +61,26 @@ class CameraHelper:
         # update yaw and pitch using ADIK keys
         cam_rot_angle = 0.1
 
-        if self._gui_input.get_key(KeyCode.I):
+        if self._gui_input.get_key(GuiInput.KeyNS.I):
             self._lookat_offset_pitch -= cam_rot_angle
-        if self._gui_input.get_key(KeyCode.K):
+        if self._gui_input.get_key(GuiInput.KeyNS.K):
             self._lookat_offset_pitch += cam_rot_angle
         self._lookat_offset_pitch = np.clip(
             self._lookat_offset_pitch,
             self._min_lookat_offset_pitch,
             self._max_lookat_offset_pitch,
         )
-        if self._gui_input.get_key(KeyCode.A):
+        if self._gui_input.get_key(GuiInput.KeyNS.A):
             self._lookat_offset_yaw -= cam_rot_angle
-        if self._gui_input.get_key(KeyCode.D):
+        if self._gui_input.get_key(GuiInput.KeyNS.D):
             self._lookat_offset_yaw += cam_rot_angle
 
     def _camera_pitch_and_yaw_mouse_control(self):
-        enable_mouse_control = self._gui_input.get_key(
-            KeyCode.R
-        ) or self._gui_input.get_mouse_button(MouseButton.MIDDLE)
+        enable_mouse_control = self._gui_input.get_key(GuiInput.KeyNS.R)
 
         if enable_mouse_control:
             # update yaw and pitch by scale * mouse relative position delta
-            scale = 0.003
+            scale = 1 / 50
             self._lookat_offset_yaw += (
                 scale * self._gui_input.relative_mouse_position[0]
             )

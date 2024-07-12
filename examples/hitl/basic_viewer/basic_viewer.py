@@ -9,9 +9,9 @@ import magnum as mn
 
 from habitat_hitl.app_states.app_service import AppService
 from habitat_hitl.app_states.app_state_abc import AppState
+from habitat_hitl.core.gui_input import GuiInput
 from habitat_hitl.core.hitl_main import hitl_main
 from habitat_hitl.core.hydra_utils import register_hydra_plugins
-from habitat_hitl.core.key_mapping import KeyCode
 from habitat_hitl.core.text_drawer import TextOnScreenAlignment
 from habitat_hitl.environment.camera_helper import CameraHelper
 
@@ -46,17 +46,17 @@ class AppStateBasicViewer(AppState):
         # update lookat
         move_delta = 0.1
         move = mn.Vector3.zero_init()
-        if self._gui_input.get_key(KeyCode.W):
+        if self._gui_input.get_key(GuiInput.KeyNS.W):
             move.x -= move_delta
-        if self._gui_input.get_key(KeyCode.S):
+        if self._gui_input.get_key(GuiInput.KeyNS.S):
             move.x += move_delta
-        if self._gui_input.get_key(KeyCode.E):
+        if self._gui_input.get_key(GuiInput.KeyNS.E):
             move.y += move_delta
-        if self._gui_input.get_key(KeyCode.Q):
+        if self._gui_input.get_key(GuiInput.KeyNS.Q):
             move.y -= move_delta
-        if self._gui_input.get_key(KeyCode.J):
+        if self._gui_input.get_key(GuiInput.KeyNS.J):
             move.z += move_delta
-        if self._gui_input.get_key(KeyCode.L):
+        if self._gui_input.get_key(GuiInput.KeyNS.L):
             move.z -= move_delta
 
         # align move forward direction with lookat direction
@@ -73,6 +73,7 @@ class AppStateBasicViewer(AppState):
             self._get_camera_lookat_pos(),
             radius,
             mn.Color3(255 / 255, 0 / 255, 0 / 255),
+            24,
         )
 
     @property
@@ -159,24 +160,24 @@ class AppStateBasicViewer(AppState):
         self._camera_helper.update(self._get_camera_lookat_pos(), dt=0)
 
     def sim_update(self, dt, post_sim_update_dict):
-        if self._app_service.gui_input.get_key_down(KeyCode.ESC):
+        if self._app_service.gui_input.get_key_down(GuiInput.KeyNS.ESC):
             self._app_service.end_episode()
             post_sim_update_dict["application_exit"] = True
 
         if (
             self._env_episode_active()
-            and self._app_service.gui_input.get_key_down(KeyCode.P)
+            and self._app_service.gui_input.get_key_down(GuiInput.KeyNS.P)
         ):
             self._paused = not self._paused
 
-        if self._app_service.gui_input.get_key_down(KeyCode.SPACE):
+        if self._app_service.gui_input.get_key_down(GuiInput.KeyNS.SPACE):
             self._do_single_step = True
             self._paused = True
 
         is_paused_this_frame = self._paused and not self._do_single_step
 
         if (
-            self._app_service.gui_input.get_key_down(KeyCode.M)
+            self._app_service.gui_input.get_key_down(GuiInput.KeyNS.M)
             and self._episode_helper.next_episode_exists()
             and not is_paused_this_frame
         ):

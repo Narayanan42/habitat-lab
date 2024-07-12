@@ -24,7 +24,6 @@ import habitat_sim
 from habitat_hitl._internal.networking.interprocess_record import (
     InterprocessRecord,
 )
-from habitat_hitl._internal.networking.keyframe_utils import get_empty_keyframe
 from habitat_hitl._internal.networking.networking_process import (
     launch_networking_process,
     terminate_networking_process,
@@ -45,9 +44,6 @@ from habitat_hitl.core.serialize_utils import (
     save_as_pickle_gzip,
 )
 from habitat_hitl.core.text_drawer import AbstractTextDrawer
-from habitat_hitl.core.types import KeyframeAndMessages
-from habitat_hitl.core.user_mask import Users
-from habitat_hitl.environment.controllers.controller_abc import Controller
 from habitat_hitl.environment.controllers.controller_helper import (
     ControllerHelper,
 )
@@ -174,16 +170,14 @@ class HitlDriver(AppDriver):
 
         self._episode_helper = EpisodeHelper(self.habitat_env)
 
-        users = Users(max(self._hitl_config.networking.max_client_count, 1))
-
         self._client_message_manager = None
         if self.network_server_enabled:
-            self._client_message_manager = ClientMessageManager(users)
+            self._client_message_manager = ClientMessageManager()
 
         gui_drawer = GuiDrawer(debug_line_drawer, self._client_message_manager)
         gui_drawer.set_line_width(self._hitl_config.debug_line_width)
 
-        self._check_init_server(gui_drawer, gui_input, users)
+        self._check_init_server(gui_drawer, gui_input)
 
         def local_end_episode(do_reset=False):
             self._end_episode(do_reset)
@@ -191,17 +185,10 @@ class HitlDriver(AppDriver):
         gui_agent_controllers: Any = (
             self.ctrl_helper.get_gui_agent_controllers()
         )
-        all_agent_controllers: List[
-            Controller
-        ] = self.ctrl_helper.get_all_agent_controllers()
-
-        # TODO: Dependency injection
-        text_drawer._client_message_manager = self._client_message_manager
 
         self._app_service = AppService(
             config=config,
             hitl_config=self._hitl_config,
-            users=users,
             gui_input=gui_input,
             remote_client_state=self._remote_client_state,
             gui_drawer=gui_drawer,
@@ -217,7 +204,6 @@ class HitlDriver(AppDriver):
             episode_helper=self._episode_helper,
             client_message_manager=self._client_message_manager,
             gui_agent_controllers=gui_agent_controllers,
-            all_agent_controllers=all_agent_controllers,
         )
 
         self._app_state: AppState = None
@@ -237,31 +223,24 @@ class HitlDriver(AppDriver):
 
     @property
     def network_server_enabled(self) -> bool:
-        return (
-            self._hitl_config.networking.enable
-            and self._hitl_config.networking.max_client_count > 0
-        )
+        return self._hitl_config.networking.enable
 
-    def _check_init_server(
-        self, gui_drawer: GuiDrawer, server_gui_input: GuiInput, users: Users
-    ):
+    def _check_init_server(self, gui_drawer: GuiDrawer, gui_input: GuiInput):
         self._remote_client_state = None
         self._interprocess_record = None
         if self.network_server_enabled:
+            # How many frames we can simulate "ahead" of what keyframes have been sent.
+            # A larger value increases lag on the client, while ensuring a more reliable
+            # simulation rate in the presence of unreliable network comms.
+            # See also server.py max_send_rate
+            max_steps_ahead = 5
             self._interprocess_record = InterprocessRecord(
-                self._hitl_config.networking
+                self._hitl_config.networking, max_steps_ahead
             )
             launch_networking_process(self._interprocess_record)
             self._remote_client_state = RemoteClientState(
-                hitl_config=self._hitl_config,
-                client_message_manager=self._client_message_manager,
-                interprocess_record=self._interprocess_record,
-                gui_drawer=gui_drawer,
-                users=users,
+                self._interprocess_record, gui_drawer, gui_input
             )
-            # Bind the server input to user 0
-            if self._hitl_config.networking.client_sync.server_input:
-                self._remote_client_state.bind_gui_input(server_gui_input, 0)
 
     def _check_terminate_server(self):
         if self.network_server_enabled:
@@ -490,9 +469,7 @@ class HitlDriver(AppDriver):
             ] = self._pending_cursor_style
             self._pending_cursor_style = None
 
-        keyframes: List[
-            str
-        ] = (
+        keyframes = (
             self.get_sim().gfx_replay_manager.write_incremental_saved_keyframes_to_string_array()
         )
 
@@ -534,9 +511,12 @@ class HitlDriver(AppDriver):
             np.flipud(image) for image in debug_images
         ]
 
+        if self._remote_client_state:
+            self._remote_client_state.on_frame_end()
+
         if self.network_server_enabled:
             if (
-                self._hitl_config.networking.client_sync.server_camera
+                self._hitl_config.networking.client_sync.camera_transform
                 and "cam_transform" in post_sim_update_dict
             ):
                 cam_transform: Optional[mn.Matrix4] = post_sim_update_dict[
@@ -547,36 +527,24 @@ class HitlDriver(AppDriver):
                         cam_transform
                     )
 
-            self._remote_client_state.on_frame_end()
-            self._send_keyframes(keyframes)
+            for keyframe_json in keyframes:
+                obj = json.loads(keyframe_json)
+                assert "keyframe" in obj
+                keyframe_obj = obj["keyframe"]
+                # Remove rigs from keyframe if skinning is disabled
+                if not self._hitl_config.networking.client_sync.skinning:
+                    if "rigCreations" in keyframe_obj:
+                        del keyframe_obj["rigCreations"]
+                    if "rigUpdates" in keyframe_obj:
+                        del keyframe_obj["rigUpdates"]
+                # Insert server->client message into the keyframe
+                message = self._client_message_manager.get_message_dict()
+                if len(message) > 0:
+                    keyframe_obj["message"] = message
+                    self._client_message_manager.clear_message_dict()
+                # Send the keyframe
+                self._interprocess_record.send_keyframe_to_networking_thread(
+                    keyframe_obj
+                )
 
         return post_sim_update_dict
-
-    def _send_keyframes(self, keyframes_json: List[str]):
-        assert self.network_server_enabled
-
-        keyframes = []
-        for keyframe_json in keyframes_json:
-            obj = json.loads(keyframe_json)
-            assert "keyframe" in obj
-            keyframe_obj = obj["keyframe"]
-            keyframes.append(keyframe_obj)
-
-        # If messages need to be sent, but no keyframe is available, create an empty keyframe.
-        if self._client_message_manager.any_message() and len(keyframes) == 0:
-            keyframes.append(get_empty_keyframe())
-
-        for keyframe in keyframes:
-            # Remove rigs from keyframe if skinning is disabled.
-            if not self._hitl_config.networking.client_sync.skinning:
-                if "rigCreations" in keyframe:
-                    del keyframe["rigCreations"]
-                if "rigUpdates" in keyframe:
-                    del keyframe["rigUpdates"]
-            # Insert server->client message into the keyframe.
-            messages = self._client_message_manager.get_messages()
-            self._client_message_manager.clear_messages()
-            # Send the keyframe.
-            self._interprocess_record.send_keyframe_to_networking_thread(
-                KeyframeAndMessages(keyframe, messages)
-            )

@@ -3,7 +3,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional
+from typing import TYPE_CHECKING, Iterator, List, Optional
 
 import magnum as mn
 import numpy as np
@@ -32,8 +32,6 @@ from habitat.tasks.rearrange.utils import (
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
-
-    from habitat_sim.simulator import Simulator
 
 
 @dataclass
@@ -69,11 +67,11 @@ class ArticulatedAgentManager:
     Handles creating, updating and managing all agent instances.
     """
 
-    def __init__(self, cfg: "DictConfig", sim: "Simulator"):
+    def __init__(self, cfg, sim):
         self._sim = sim
-        self._all_agent_data: List[ArticulatedAgentData] = []
+        self._all_agent_data = []
         self._is_pb_installed = is_pb_installed()
-        self.agent_names: Dict[str, Any] = cfg.agents
+        self.agent_names = cfg.agents
 
         for agent_name in cfg.agents_order:
             agent_cfg = cfg.agents[agent_name]
@@ -82,10 +80,10 @@ class ArticulatedAgentManager:
             agent = agent_cls(agent_cfg, sim)
             grasp_managers = []
             for grasp_manager_id in range(agent_cfg.grasp_managers):
-                grasp_mgr = RearrangeGraspManager(
+                graps_mgr = RearrangeGraspManager(
                     sim, cfg, agent, grasp_manager_id
                 )
-                grasp_managers.append(grasp_mgr)
+                grasp_managers.append(graps_mgr)
 
             if len(cfg.agents) > 1:
                 # Prefix sensors if there is more than 1 agent in the scene.
@@ -172,7 +170,7 @@ class ArticulatedAgentManager:
             )
             agent_data.articulated_agent.reset()
 
-            # Consume a fixed position from SIMULATOR.agent_0 if configured
+            # consume a fixed position from SIMUALTOR.agent_0 if configured
             if agent_data.cfg.is_set_start_state:
                 agent_data.articulated_agent.base_pos = mn.Vector3(
                     agent_data.cfg.start_position
@@ -182,14 +180,14 @@ class ArticulatedAgentManager:
                     mn.Vector3(agent_rot[:3]), agent_rot[3]
                 )
 
-    def __getitem__(self, key: int) -> ArticulatedAgentData:
+    def __getitem__(self, key: int):
         """
         Fetches the agent data at the agent index.
         """
 
         return self._all_agent_data[key]
 
-    def __len__(self) -> int:
+    def __len__(self):
         """
         The number of agents.
         """

@@ -20,12 +20,6 @@ habitat_hitl:
     # When enabled, we run a websocket server that connects to remote clients. A HITL app with networking enabled is an "HITL server". See pick_throw_vr example app.
     enable: False
 
-    # Number of accepted concurrent clients (multiplayer if higher than one). All connections beyond this count will be rejected. Beware that this can be different from the agent count.
-    max_client_count: 1
-
-    # Accept incoming connections by default. If disabled, connections must be activated using InterprocessRecord.enable_new_connections().
-    enable_connections_by_default: True
-
     # We'll listen for incoming client connections at this port.
     port: 8888
 
@@ -43,14 +37,9 @@ habitat_hitl:
     # Optionally kick an idle client after n seconds.
     client_max_idle_duration: ~
 
-    # Override incoming client connection parameters for testing purposes.
-    mock_connection_params_dict: None
-
     client_sync:
-      # If enabled, the server main camera transform will be sent to the client. Disable if the client should control its own camera (e.g. VR), or if clients must use different camera transforms (e.g. multiplayer).
-      server_camera: True
-      # If enabled, the first client input is relayed to the server's GuiInput. Disable if clients have independent controls from the server.
-      server_input: True
+      # If enabled, the main camera transform will be sent to the client. Disable if the client should control its own camera (e.g. VR).
+      camera_transform: True
       # Enable transmission of skinned mesh poses. If 'camera.first_person_mode' is enabled, you should generally disable this as well as enable `hide_humanoid_in_gui` because the humanoid will occlude the camera.
       skinning: True
 

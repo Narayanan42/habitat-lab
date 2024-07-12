@@ -8,22 +8,9 @@ from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import magnum as mn
-import numpy as np
 
 import habitat_sim
 from habitat.sims.habitat_simulator.debug_visualizer import DebugVisualizer
-
-
-def object_shortname_from_handle(object_handle: str) -> str:
-    """
-    Splits any path directory and instance increment from the handle.
-
-    :param object_handle: The raw object template or instance handle.
-
-    :return: the shortened name string.
-    """
-
-    return object_handle.split("/")[-1].split(".")[0].split("_:")[0]
 
 
 def register_custom_wireframe_box_template(
@@ -184,8 +171,7 @@ def get_bb_for_object_id(
             f"object id {obj_id} is not found, this is unexpected. Invalid/stale object id?"
         )
 
-    if not obj.is_articulated:
-        # rigid object
+    if isinstance(obj, habitat_sim.physics.ManagedRigidObject):
         return (obj.root_scene_node.cumulative_bb, obj.transformation)
 
     # ManagedArticulatedObject
@@ -233,57 +219,7 @@ def get_obj_size_along(
     return local_vec_size, center
 
 
-def size_regularized_bb_distance(
-    bb_a: mn.Range3D,
-    bb_b: mn.Range3D,
-    transform_a: mn.Matrix4 = None,
-    transform_b: mn.Matrix4 = None,
-    flatten_axis: int = None,
-) -> float:
-    """
-    Get the heuristic surface-to-surface distance between two bounding boxes (regularized by their individual heuristic sizes).
-    Estimate the distance from center to boundary along the line between bb centers. These sizes are then subtracted from the center-to-center distance as a heuristic for surface-to-surface distance.
-
-    :param bb_a: local bounding box of one object
-    :param bb_b: local bounding box of another object
-    :param transform_a: local to global transform for the first object. Default is identity.
-    :param transform_b: local to global transform for the second object. Default is identity.
-    :param flatten_axis: Optionally flatten one axis of the displacement vector. This effectively projects the displacement. For example, index "1" would result in horizontal (xz) distance.
-
-    :return: heuristic surface-to-surface distance.
-    """
-
-    # check for a valid value
-    assert flatten_axis in [None, 0, 1, 2]
-
-    if transform_a is None:
-        transform_a = mn.Matrix4.identity_init()
-    if transform_b is None:
-        transform_b = mn.Matrix4.identity_init()
-
-    a_center = transform_a.transform_point(bb_a.center())
-    b_center = transform_b.transform_point(bb_b.center())
-
-    disp = a_center - b_center
-    # optionally project the displacement vector by flattening it
-    if flatten_axis is not None:
-        disp[flatten_axis] = 0
-    dist = disp.length()
-    disp_dir = disp / dist
-
-    local_scale_a = mn.Matrix4.scaling(bb_a.size() / 2.0)
-    local_vec_a = transform_a.inverted().transform_vector(disp_dir)
-    local_vec_size_a = local_scale_a.transform_vector(local_vec_a).length()
-
-    local_scale_b = mn.Matrix4.scaling(bb_b.size() / 2.0)
-    local_vec_b = transform_b.inverted().transform_vector(disp_dir)
-    local_vec_size_b = local_scale_b.transform_vector(local_vec_b).length()
-
-    # if object bounding boxes are significantly overlapping then distance may be negative, clamp to 0
-    return max(0, dist - local_vec_size_a - local_vec_size_b)
-
-
-def size_regularized_object_distance(
+def size_regularized_distance(
     sim: habitat_sim.Simulator,
     object_id_a: int,
     object_id_b: int,
@@ -319,16 +255,29 @@ def size_regularized_object_distance(
         sim, object_id_b, ao_link_map, ao_aabbs
     )
 
-    return size_regularized_bb_distance(
-        obja_bb, objb_bb, transform_a, transform_b
-    )
+    a_center = transform_a.transform_point(obja_bb.center())
+    b_center = transform_b.transform_point(objb_bb.center())
+
+    disp = a_center - b_center
+    dist = disp.length()
+    disp_dir = disp / dist
+
+    local_scale_a = mn.Matrix4.scaling(obja_bb.size() / 2.0)
+    local_vec_a = transform_a.inverted().transform_vector(disp_dir)
+    local_vec_size_a = local_scale_a.transform_vector(local_vec_a).length()
+
+    local_scale_b = mn.Matrix4.scaling(objb_bb.size() / 2.0)
+    local_vec_b = transform_b.inverted().transform_vector(disp_dir)
+    local_vec_size_b = local_scale_b.transform_vector(local_vec_b).length()
+
+    # if object bounding boxes are significantly overlapping then distance may be negative, clamp to 0
+    return max(0, dist - local_vec_size_a - local_vec_size_b)
 
 
 def bb_ray_prescreen(
     sim: habitat_sim.Simulator,
     obj: habitat_sim.physics.ManagedRigidObject,
     support_obj_ids: Optional[List[int]] = None,
-    ignore_obj_ids: Optional[List[int]] = None,
     check_all_corners: bool = False,
 ) -> Dict[str, Any]:
     """
@@ -337,7 +286,6 @@ def bb_ray_prescreen(
     :param sim: The Simulator instance.
     :param obj: The RigidObject instance.
     :param support_obj_ids: A list of object ids designated as valid support surfaces for object placement. Contact with other objects is a criteria for placement rejection.
-    :param ignore_obj_ids: A list of object ids which should be ignored in contact checks and raycasts. For example, the body of the agent placing an object.
     :param check_all_corners: Optionally cast rays from all bounding box corners instead of only casting a ray from the center of mass.
 
     :return: a dict of raycast metadata: "base_rel_height","surface_snap_point", "raycast_results"
@@ -376,11 +324,7 @@ def bb_ray_prescreen(
             raycast_results.append(sim.cast_ray(ray))
             # classify any obstructions before hitting the support surface
             for hit in raycast_results[-1].hits:
-                if (
-                    hit.object_id == obj.object_id
-                    or ignore_obj_ids is not None
-                    and hit.object_id in ignore_obj_ids
-                ):
+                if hit.object_id == obj.object_id:
                     continue
                 elif hit.object_id in support_obj_ids:
                     hit_point = hit.point
@@ -434,9 +378,7 @@ def snap_down(
     sim: habitat_sim.Simulator,
     obj: habitat_sim.physics.ManagedRigidObject,
     support_obj_ids: Optional[List[int]] = None,
-    ignore_obj_ids: Optional[List[int]] = None,
     dbv: Optional[DebugVisualizer] = None,
-    max_collision_depth: float = 0.01,
 ) -> bool:
     """
     Attempt to project an object in the gravity direction onto the surface below it.
@@ -444,9 +386,7 @@ def snap_down(
     :param sim: The Simulator instance.
     :param obj: The RigidObject instance.
     :param support_obj_ids: A list of object ids designated as valid support surfaces for object placement. Contact with other objects is a criteria for placement rejection. If none provided, default support surface is the stage/ground mesh (0).
-    :param ignore_obj_ids: A list of object ids which should be ignored in contact checks and raycasts. For example, the body of the agent placing an object.
     :param dbv: Optionally provide a DebugVisualizer (dbv) to render debug images of each object's computed snap position before collision culling.
-    :param max_collision_depth: The maximum contact penetration depth between the object and the support surface. Higher values are easier to sample, but result in less dynamically stabile states.
 
     :return: boolean placement success.
 
@@ -457,20 +397,14 @@ def snap_down(
     To use this utility, generate an initial placement for any object above any of the designated support surfaces and call this function to attempt to snap it onto the nearest surface in the gravity direction.
     """
 
-    aom = sim.get_articulated_object_manager()
-
     cached_position = obj.translation
 
     if support_obj_ids is None:
         # set default support surface to stage/ground mesh
         support_obj_ids = [habitat_sim.stage_id]
 
-    if ignore_obj_ids is None:
-        # default empty to avoid extra none checks in-loop later
-        ignore_obj_ids = []
-
     bb_ray_prescreen_results = bb_ray_prescreen(
-        sim, obj, support_obj_ids, ignore_obj_ids, check_all_corners=False
+        sim, obj, support_obj_ids, check_all_corners=False
     )
 
     if bb_ray_prescreen_results["surface_snap_point"] is None:
@@ -487,49 +421,19 @@ def snap_down(
         cps = sim.get_physics_contact_points()
         for cp in cps:
             if (
-                # the object is involved in the contact
                 cp.object_id_a == obj.object_id
                 or cp.object_id_b == obj.object_id
+            ) and (
+                (cp.contact_distance < -0.05)
+                or not (
+                    cp.object_id_a in support_obj_ids
+                    or cp.object_id_b in support_obj_ids
+                )
             ):
-                cp_obj_id_a = cp.object_id_a
-                cp_obj_id_b = cp.object_id_b
-                if cp.link_id_a > 0:
-                    # object_a is an AO and we need to get the link object id
-                    ao_a = aom.get_object_by_id(cp.object_id_a)
-                    links_to_obj_ids = {
-                        v: k for k, v in ao_a.link_object_ids.items()
-                    }
-                    cp_obj_id_a = links_to_obj_ids[cp.link_id_a]
-                if cp.link_id_b > 0:
-                    # object_b is an AO and we need to get the link object id
-                    ao_b = aom.get_object_by_id(cp.object_id_b)
-                    links_to_obj_ids = {
-                        v: k for k, v in ao_b.link_object_ids.items()
-                    }
-                    cp_obj_id_b = links_to_obj_ids[cp.link_id_b]
-
-                if not (
-                    # the contact does not involve ignored objects
-                    cp_obj_id_a in ignore_obj_ids
-                    or cp_obj_id_b in ignore_obj_ids
-                ) and (
-                    not (
-                        # contact is not with a support object
-                        cp_obj_id_a in support_obj_ids
-                        or cp_obj_id_b in support_obj_ids
-                    )
-                    or (
-                        # contact exceeds maximum depth
-                        # NOTE: contact depth is negative distance
-                        cp.contact_distance
-                        < (-1 * max_collision_depth)
-                    )
-                ):
-                    obj.translation = cached_position
-                    return False
-                    # print(f" Failure: contact in final position w/ distance = {cp.contact_distance}.")
-                    # print(f" Failure: contact in final position with non support object {cp.object_id_a} or {cp.object_id_b}.")
-
+                obj.translation = cached_position
+                # print(f" Failure: contact in final position w/ distance = {cp.contact_distance}.")
+                # print(f" Failure: contact in final position with non support object {cp.object_id_a} or {cp.object_id_b}.")
+                return False
         return True
     else:
         # no valid position found, reset and return failure
@@ -673,54 +577,6 @@ def get_ao_link_id_map(sim: habitat_sim.Simulator) -> Dict[int, int]:
     return ao_link_map
 
 
-def get_ao_default_link(
-    ao: habitat_sim.physics.ManagedArticulatedObject,
-    compute_if_not_found: bool = False,
-) -> Optional[int]:
-    """
-    Get the "default" link index for a ManagedArticulatedObject.
-    The "default" link is the one link which should be used if only one joint can be actuated. For example, the largest or most accessible drawer or door.
-    The default link is determined by:
-        - must be "prismatic" or "revolute" joint type
-        - first look in the metadata Configuration for an annotated link.
-        - (if compute_if_not_found) - if not annotated, it is programmatically computed from a heuristic.
-
-    Default link heuristic: the link with the lowest Y value in the bounding box with appropriate joint type.
-
-    :param compute_if_not_found: If true, try to compute the default link if it isn't found.
-
-    :return: The default link index or None if not found. Cannot be base link (-1).
-    """
-
-    # first look in metadata
-    default_link = ao.user_attributes.get("default_link")
-
-    if default_link is None and compute_if_not_found:
-        valid_joint_types = [
-            habitat_sim.physics.JointType.Revolute,
-            habitat_sim.physics.JointType.Prismatic,
-        ]
-        lowest_link = None
-        lowest_y: int = None
-        # compute the default link
-        for link_id in ao.get_link_ids():
-            if ao.get_link_joint_type(link_id) in valid_joint_types:
-                # use minimum global keypoint Y value
-                link_lowest_y = min(
-                    get_articulated_link_global_keypoints(ao, link_id),
-                    key=lambda x: x[1],
-                )[1]
-                if lowest_y is None or link_lowest_y < lowest_y:
-                    lowest_y = link_lowest_y
-                    lowest_link = link_id
-        if lowest_link is not None:
-            default_link = lowest_link
-            # if found, set in metadata for next time
-            ao.user_attributes.set("default_link", default_link)
-
-    return default_link
-
-
 def get_obj_from_id(
     sim: habitat_sim.Simulator,
     obj_id: int,
@@ -767,7 +623,7 @@ def get_obj_from_handle(
     Get a ManagedRigidObject or ManagedArticulatedObject from its instance handle.
 
     :param sim: The Simulator instance.
-    :param obj_handle: object instance handle for which ManagedObject is desired.
+    :param obj_handle: object istance handle for which ManagedObject is desired.
 
     :return: a ManagedObject or None
     """
@@ -780,36 +636,6 @@ def get_obj_from_handle(
         return aom.get_object_by_handle(obj_handle)
 
     return None
-
-
-def get_obj_transform_from_id(
-    sim: habitat_sim.Simulator,
-    obj_id: int,
-    ao_link_map: Optional[Dict[int, int]] = None,
-) -> mn.Matrix4:
-    """
-    Retrieve the local to global transform of the object or link identified by the object_id.
-
-    :param sim: The Simulator instance.
-    :param obj_id: object id for which ManagedObject is desired.
-    :param ao_link_map: A pre-computed map from link object ids to their parent ArticulatedObject's object id.
-
-    :return: a Matrix4 local to global transform or None
-    """
-
-    parent_obj = get_obj_from_id(sim, obj_id, ao_link_map)
-    if parent_obj is None:
-        # invalid object id
-        return None
-
-    if parent_obj.object_id == obj_id:
-        # this is a rigid or articulated object
-        return parent_obj.transformation
-    else:
-        # this is a link
-        return parent_obj.get_link_scene_node(
-            parent_obj.link_object_ids[obj_id]
-        ).transformation
 
 
 def get_global_keypoints_from_bb(
@@ -909,8 +735,7 @@ def get_global_keypoints_from_object_id(
 
     obj = get_obj_from_id(sim, object_id, ao_link_map)
 
-    if not obj.is_articulated:
-        # rigid object
+    if isinstance(obj, habitat_sim.physics.ManagedBulletRigidObject):
         return get_rigid_object_global_keypoints(obj)
     elif obj.object_id != object_id:
         # this is an ArticulatedLink
@@ -1045,7 +870,7 @@ def within(
     first_voting_keypoint = 0
 
     if center_ensures_containment:
-        # initialize the list from keypoint 0 (center of bounding box) which guarantees containment
+        # initialize the list from keypoint 0 (center of bounding box) which gaurantees containment
         containment_ids = list(keypoint_intersect_set[0])
         first_voting_keypoint = 1
 
@@ -1082,7 +907,7 @@ def ontop(
 ) -> List[int]:
     """
     Get a list of all object ids or objects that are "ontop" of a particular object_a.
-    Concretely, 'ontop' is defined as: contact points between object_a and object_b have vertical normals "upward" relative to object_a.
+    Concretely, 'ontop' is defined as: contact points between object_a and objectB have vertical normals "upward" relative to object_a.
     This function uses collision points to determine which objects are resting on or contacting the surface of object_a.
 
     :param sim: The Simulator instance.
@@ -1164,8 +989,8 @@ def on_floor(
     :return: Whether or not the object is considered "on the floor" given the configuration.
     """
 
-    assert (
-        not object_a.is_articulated
+    assert isinstance(
+        object_a, habitat_sim.physics.ManagedRigidObject
     ), "Object must be ManagedRigidObject, not implemented for ArticulatedObjects or links."
 
     if alt_pathfinder is None:
@@ -1263,319 +1088,3 @@ def get_object_regions(
     )
 
     return sim.semantic_scene.get_regions_for_points(key_points)
-
-
-def get_floor_point_in_region(
-    sim: habitat_sim.Simulator,
-    region_index: int,
-    island_index: int = -1,
-    max_center_samples: int = 100,
-    max_global_samples: int = 1000,
-    quick_return: bool = False,
-) -> Optional[mn.Vector3]:
-    """
-    Sample the navmesh to find a point on the floor within a given region.
-
-    This method attempts to find a point in the region with maximum navmesh clearance by sorting candidates on `distance_to_closest_obstacle`.
-    Because this method uses multiple sampling passes it is advised to use it in initialization and pre-processes rather than within an application loop.
-
-    :param sim: The Simulator instance.
-    :param region_index: The index of the Region within which to sample.
-    :param island_index: The index of the navmesh island representing the active floor area. Default -1 is all islands. Should be set to the same island used for other navmesh operations in the application. For example, the largest indoor island for the scene.
-    :param max_center_samples: The number of samples near the center point to attempt if applicable. This will be done first. <=0 skips center sampling.
-    :param max_global_samples: The number of global navmesh samples to attempt if center point samples were unsuccessful. <=0 skips this step.
-    :param quick_return: If True, the first valid sample will be returned instead of continuing to search for a better sample. Use this option when speed is more important than the quality or consistency.
-
-    :return: The sampled floor point within the given region or None if a point could not be found.
-    """
-
-    # get the SemanticRegion from the index
-    region = sim.semantic_scene.regions[region_index]
-
-    #################
-    # sampling points:
-    attempts = 0
-    best_sample: Optional[mn.Vector3] = None
-    best_navmesh_dist = -1
-
-    # first try aiming at the center (nice for convex regions)
-    if max_center_samples > 0:
-        # get the center of the region's bounds and attempt to snap it to the navmesh
-        region_center = region.aabb.center
-        region_center_snap = sim.pathfinder.snap_point(
-            region_center, island_index=island_index
-        )
-
-        if not np.isnan(region_center_snap[0]):
-            # sampling near the center
-            while attempts < max_center_samples:
-                # get a point within 1 meter of the snapped region center if possible
-                sample = sim.pathfinder.get_random_navigable_point_near(
-                    region_center_snap, radius=1.0, island_index=island_index
-                )
-                if not np.isnan(sample[0]) and region.contains(sample):
-                    navmesh_dist = sim.pathfinder.distance_to_closest_obstacle(
-                        sample
-                    )
-                    if navmesh_dist > best_navmesh_dist:
-                        # found a valid point in a more "open" part of the region
-                        best_sample = sample
-                        best_navmesh_dist = navmesh_dist
-                        if quick_return:
-                            # short-circuit to return the first valid sample
-                            return best_sample
-                attempts += 1
-        else:
-            # region center doesn't snap, so move on
-            pass
-
-    # try again without aiming for the center (in case of concave region)
-    if best_sample is None:
-        attempts = 0
-        while attempts < max_global_samples:
-            sample = sim.pathfinder.get_random_navigable_point(
-                island_index=island_index
-            )
-            if region.contains(sample):
-                navmesh_dist = sim.pathfinder.distance_to_closest_obstacle(
-                    sample
-                )
-                if navmesh_dist > best_navmesh_dist:
-                    # found a valid point in a more "open" part of the region
-                    best_sample = sample
-                    best_navmesh_dist = navmesh_dist
-                    if quick_return:
-                        # short-circuit to return the first valid sample
-                        return best_sample
-            attempts += 1
-
-    return best_sample
-
-
-def get_link_normalized_joint_position(
-    object_a: habitat_sim.physics.ManagedArticulatedObject, link_ix: int
-) -> float:
-    """
-    Normalize the joint limit range [min, max] -> [0,1] and return the current joint state in this range.
-
-    :param object_a: The parent ArticulatedObject of the link.
-    :param link_ix: The index of the link within the parent object. Not the link's object_id.
-
-    :return: normalized joint position [0,1]
-    """
-
-    assert object_a.get_link_joint_type(link_ix) in [
-        habitat_sim.physics.JointType.Revolute,
-        habitat_sim.physics.JointType.Prismatic,
-    ], f"Invalid joint type '{object_a.get_link_joint_type(link_ix)}'. Open/closed not a valid check for multi-dimensional or fixed joints."
-
-    joint_pos_ix = object_a.get_link_joint_pos_offset(link_ix)
-    joint_pos = object_a.joint_positions[joint_pos_ix]
-    limits = object_a.joint_position_limits
-
-    # compute the normalized position [0,1]
-    n_pos = (joint_pos - limits[0][joint_pos_ix]) / (
-        limits[1][joint_pos_ix] - limits[0][joint_pos_ix]
-    )
-    return n_pos
-
-
-def set_link_normalized_joint_position(
-    object_a: habitat_sim.physics.ManagedArticulatedObject,
-    link_ix: int,
-    normalized_pos: float,
-) -> None:
-    """
-    Set the joint's state within its limits from a normalized range [0,1] -> [min, max]
-
-    Assumes the joint has valid joint limits.
-
-    :param object_a: The parent ArticulatedObject of the link.
-    :param link_ix: The index of the link within the parent object. Not the link's object_id.
-    :param normalized_pos: The normalized position [0,1] to set.
-    """
-
-    assert object_a.get_link_joint_type(link_ix) in [
-        habitat_sim.physics.JointType.Revolute,
-        habitat_sim.physics.JointType.Prismatic,
-    ], f"Invalid joint type '{object_a.get_link_joint_type(link_ix)}'. Open/closed not a valid check for multi-dimensional or fixed joints."
-
-    assert (
-        normalized_pos <= 1.0 and normalized_pos >= 0
-    ), "values outside the range [0,1] are by definition beyond the joint limits."
-
-    joint_pos_ix = object_a.get_link_joint_pos_offset(link_ix)
-    limits = object_a.joint_position_limits
-    joint_positions = object_a.joint_positions
-    joint_positions[joint_pos_ix] = limits[0][joint_pos_ix] + (
-        normalized_pos * (limits[1][joint_pos_ix] - limits[0][joint_pos_ix])
-    )
-    object_a.joint_positions = joint_positions
-
-
-def link_is_open(
-    object_a: habitat_sim.physics.ManagedArticulatedObject,
-    link_ix: int,
-    threshold: float = 0.4,
-) -> bool:
-    """
-    Check whether a particular AO link is in the "open" state.
-    We assume that joint limits define the closed state (min) and open state (max).
-
-    :param object_a: The parent ArticulatedObject of the link to check.
-    :param link_ix: The index of the link within the parent object. Not the link's object_id.
-    :param threshold: The normalized threshold ratio of joint ranges which are considered "open". E.g. 0.8 = 80%
-
-    :return: Whether or not the link is considered "open".
-    """
-
-    return get_link_normalized_joint_position(object_a, link_ix) >= threshold
-
-
-def link_is_closed(
-    object_a: habitat_sim.physics.ManagedArticulatedObject,
-    link_ix: int,
-    threshold: float = 0.1,
-) -> bool:
-    """
-    Check whether a particular AO link is in the "closed" state.
-    We assume that joint limits define the closed state (min) and open state (max).
-
-    :param object_a: The parent ArticulatedObject of the link to check.
-    :param link_ix: The index of the link within the parent object. Not the link's object_id.
-    :param threshold: The normalized threshold ratio of joint ranges which are considered "closed". E.g. 0.1 = 10%
-
-    :return: Whether or not the link is considered "closed".
-    """
-
-    return get_link_normalized_joint_position(object_a, link_ix) <= threshold
-
-
-def close_link(
-    object_a: habitat_sim.physics.ManagedArticulatedObject, link_ix: int
-) -> None:
-    """
-    Set a link to the "closed" state. Sets the joint position to the minimum joint limit.
-
-    TODO: does not do any collision checking to validate the state or move any other objects which may be contained in or supported by this link.
-
-    :param object_a: The parent ArticulatedObject of the link to check.
-    :param link_ix: The index of the link within the parent object. Not the link's object_id.
-    """
-
-    set_link_normalized_joint_position(object_a, link_ix, 0)
-
-
-def open_link(
-    object_a: habitat_sim.physics.ManagedArticulatedObject, link_ix: int
-) -> None:
-    """
-    Set a link to the "open" state. Sets the joint position to the maximum joint limit.
-
-    TODO: does not do any collision checking to validate the state or move any other objects which may be contained in or supported by this link.
-
-    :param object_a: The parent ArticulatedObject of the link to check.
-    :param link_ix: The index of the link within the parent object. Not the link's object_id.
-    """
-
-    set_link_normalized_joint_position(object_a, link_ix, 1.0)
-
-
-def bb_next_to(
-    bb_a: mn.Range3D,
-    bb_b: mn.Range3D,
-    transform_a: mn.Matrix4 = None,
-    transform_b: mn.Matrix4 = None,
-    hor_l2_threshold=0.3,
-) -> bool:
-    """
-    Check whether or not two bounding boxes should be considered "next to" one another.
-    Concretely, consists of two checks:
-     1. assert overlap between the vertical range of the two bounding boxes.
-     2. regularized horizontal L2 distance between object centers. Regularized in this case means projected displacement vector is truncated by each object's heuristic size.
-
-    :param bb_a: local bounding box of one object
-    :param bb_b: local bounding box of another object
-    :param transform_a: local to global transform for the first object. Default is identity.
-    :param transform_b: local to global transform for the second object. Default is identity.
-    :param hor_l2_threshold: regularized horizontal L2 distance allowed between the objects' centers.
-
-    :return: Whether or not the objects are heuristically "next to" one another.
-    """
-
-    if transform_a is None:
-        transform_a = mn.Matrix4.identity_init()
-    if transform_b is None:
-        transform_b = mn.Matrix4.identity_init()
-
-    keypoints_a = get_global_keypoints_from_bb(bb_a, transform_a)
-    keypoints_b = get_global_keypoints_from_bb(bb_b, transform_b)
-
-    lowest_height_a = min([p[1] for p in keypoints_a])
-    lowest_height_b = min([p[1] for p in keypoints_b])
-    highest_height_a = max([p[1] for p in keypoints_a])
-    highest_height_b = max([p[1] for p in keypoints_b])
-
-    # check for non-overlapping bounding boxes
-    if (
-        highest_height_a < lowest_height_b
-        or highest_height_b < lowest_height_a
-    ):
-        return False
-
-    if (
-        size_regularized_bb_distance(
-            bb_a, bb_b, transform_a, transform_b, flatten_axis=1
-        )
-        > hor_l2_threshold
-    ):
-        return False
-
-    return True
-
-
-def obj_next_to(
-    sim: habitat_sim.Simulator,
-    object_id_a: int,
-    object_id_b: int,
-    hor_l2_threshold=0.5,
-    ao_link_map: Dict[int, int] = None,
-    ao_aabbs: Dict[int, mn.Range3D] = None,
-) -> bool:
-    """
-    Check whether or not two objects should be considered "next to" one another.
-    Concretely, consists of two checks:
-     1. bounding boxes must overlap vertically.
-     2. regularized horizontal L2 distance between object centers must be less than a threshold. Regularized in this case means displacement vector is truncated by each object's heuristic size.
-
-    :param sim: The Simulator instance.
-    :param object_id_a: object_id of the first ManagedObject or link.
-    :param object_id_b: object_id of the second ManagedObject or link.
-    :param hor_l2_threshold: regularized horizontal L2 distance allow between the objects' centers. This should be tailored to the scenario.
-    :param ao_link_map: A pre-computed map from link object ids to their parent ArticulatedObject's object id.
-    :param ao_aabbs: A pre-computed map from ArticulatedObject object_ids to their local bounding boxes. If not provided, recomputed as necessary.
-
-    :return: Whether or not the objects are heuristically "next to" one another.
-    """
-
-    assert object_id_a != object_id_b, "Object cannot be 'next to' itself."
-
-    assert (
-        object_id_a != habitat_sim.stage_id
-        and object_id_b != habitat_sim.stage_id
-    ), "Cannot compute distance between the stage and its contents."
-
-    obja_bb, transform_a = get_bb_for_object_id(
-        sim, object_id_a, ao_link_map, ao_aabbs
-    )
-    objb_bb, transform_b = get_bb_for_object_id(
-        sim, object_id_b, ao_link_map, ao_aabbs
-    )
-
-    return bb_next_to(
-        obja_bb,
-        objb_bb,
-        transform_a,
-        transform_b,
-        hor_l2_threshold,
-    )

@@ -32,42 +32,46 @@ class GuiAppRenderer:
 class InputHandlerApplication(Application):
     def __init__(self, config):
         super().__init__(config)
-        self._gui_input = GuiInput()
-        self._mouse_ray = None
+        self._gui_inputs = []
+
+    def add_gui_input(self, gui_input):
+        self._gui_inputs.append(gui_input)
 
     def key_press_event(self, event: Application.KeyEvent) -> None:
-        key = MagnumKeyConverter.convert_key(event.key)
-        if key is not None:
-            gui_input = self._gui_input
-            if key not in self._gui_input._key_held:
-                gui_input._key_held.add(key)
-                gui_input._key_down.add(key)
+        key = MagnumKeyConverter.convert(event.key)
+        if key:
+            for wrapper in self._gui_inputs:
+                # If the key is already held, this is a repeat press event and we should
+                # ignore it.
+                if key not in wrapper._key_held:
+                    wrapper._key_held.add(key)
+                    wrapper._key_down.add(key)
 
     def key_release_event(self, event: Application.KeyEvent) -> None:
-        key = MagnumKeyConverter.convert_key(event.key)
-        if key is not None:
-            gui_input = self._gui_input
-            if key in gui_input._key_held:
-                gui_input._key_held.remove(key)
-            gui_input._key_up.add(key)
+        key = MagnumKeyConverter.convert(event.key)
+        if key:
+            for wrapper in self._gui_inputs:
+                if key in wrapper._key_held:
+                    wrapper._key_held.remove(key)
+                wrapper._key_up.add(key)
 
     def mouse_press_event(self, event: Application.MouseEvent) -> None:
-        key = MagnumKeyConverter.convert_mouse_button(event.button)
-        if key is not None:
-            gui_input = self._gui_input
-            # If the key is already held, this is a repeat press event and we should
-            # ignore it.
-            if key not in gui_input._mouse_button_held:
-                gui_input._mouse_button_held.add(key)
-                gui_input._mouse_button_down.add(key)
+        mouse_button = event.button
+        GuiInput.validate_mouse_button(mouse_button)
+        for wrapper in self._gui_inputs:
+            wrapper._mouse_button_held.add(mouse_button)
+            wrapper._mouse_button_down.add(mouse_button)
 
     def mouse_release_event(self, event: Application.MouseEvent) -> None:
-        key = MagnumKeyConverter.convert_mouse_button(event.button)
-        if key is not None:
-            gui_input = self._gui_input
-            if key in gui_input._mouse_button_held:
-                gui_input._mouse_button_held.remove(key)
-            gui_input._mouse_button_up.add(key)
+        mouse_button = event.button
+        GuiInput.validate_mouse_button(mouse_button)
+        for wrapper in self._gui_inputs:
+            # In theory, mouse_button should always be present in _mouse_button_held.
+            # In practice, we seem to get spurious release events due to the app
+            # losing focus (e.g. switching to VS code debugger while mouse-clicking)
+            if mouse_button in wrapper._mouse_button_held:
+                wrapper._mouse_button_held.remove(mouse_button)
+                wrapper._mouse_button_up.add(mouse_button)
 
     def mouse_scroll_event(self, event: Application.MouseEvent) -> None:
         # shift+scroll is forced into x direction on mac, seemingly at OS level,
@@ -78,8 +82,9 @@ class InputHandlerApplication(Application):
             else event.offset.x
         )
 
-        # accumulate
-        self._gui_input._mouse_scroll_offset += scroll_mod_val
+        for wrapper in self._gui_inputs:
+            # accumulate
+            wrapper._mouse_scroll_offset += scroll_mod_val
 
     def get_mouse_position(
         self, mouse_event_position: mn.Vector2i
@@ -100,20 +105,22 @@ class InputHandlerApplication(Application):
         relative_mouse_position = self.get_mouse_position(
             event.relative_position
         )
-        gui_input = self._gui_input
-        gui_input._mouse_position = mouse_pos
-        gui_input._relative_mouse_position[0] += relative_mouse_position[0]
-        gui_input._relative_mouse_position[1] += relative_mouse_position[1]
-        if self._mouse_ray:
-            gui_input._mouse_ray = self._mouse_ray
+        for wrapper in self._gui_inputs:
+            wrapper._mouse_position = mouse_pos
+            wrapper._relative_mouse_position[0] += relative_mouse_position[0]
+            wrapper._relative_mouse_position[1] += relative_mouse_position[1]
 
     def update_mouse_ray(self, unproject_fn):
-        self._mouse_ray = unproject_fn(self._gui_input._mouse_position)
+        for wrapper in self._gui_inputs:
+            wrapper._mouse_ray = unproject_fn(wrapper._mouse_position)
 
 
 class GuiApplication(InputHandlerApplication):
     def __init__(self, glfw_config, target_sps):
         super().__init__(glfw_config)
+
+        self._sim_input = GuiInput()
+        self.add_gui_input(self._sim_input)
 
         self._driver = None
         self._app_renderer = None
@@ -122,7 +129,7 @@ class GuiApplication(InputHandlerApplication):
         self._debug_sps = 0.0
 
     def get_sim_input(self):
-        return self._gui_input
+        return self._sim_input
 
     def set_driver_and_renderer(self, driver, app_renderer):
         assert isinstance(app_renderer, GuiAppRenderer)
@@ -179,7 +186,7 @@ class GuiApplication(InputHandlerApplication):
 
         for _ in range(num_sim_updates):
             post_sim_update_dict = self._driver.sim_update(sim_dt)
-            self._gui_input.on_frame_end()
+            self._sim_input.on_frame_end()
             self._post_sim_update(post_sim_update_dict)
             if "application_exit" in post_sim_update_dict:
                 return

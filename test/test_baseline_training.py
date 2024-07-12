@@ -21,6 +21,7 @@ try:
     import torch
     import torch.distributed
 
+    import habitat_sim.utils.datasets_download as data_downloader
     from habitat_baselines.common.baseline_registry import baseline_registry
     from habitat_baselines.config.default import get_config
 
@@ -34,6 +35,19 @@ try:
     pygame_installed = True
 except ImportError:
     pygame_installed = False
+
+
+def setup_function(test_trainers):
+    # Download the needed datasets
+    data_downloader.main(
+        [
+            "--uids",
+            "rearrange_task_assets",
+            "hab3_bench_assets",
+            "--no-replace",
+            "--no-prune",
+        ]
+    )
 
 
 @pytest.mark.skipif(
@@ -112,9 +126,7 @@ except ImportError:
     ],
 )
 @pytest.mark.parametrize("trainer_name", ["ddppo", "ver"])
-@pytest.mark.parametrize(
-    "use_batch_renderer", [False]
-)  # Batch renderer test temporarily disabled.
+@pytest.mark.parametrize("use_batch_renderer", [False, True])
 def test_trainers(
     config_path: str,
     num_updates: int,
